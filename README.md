@@ -22,7 +22,7 @@ Depth Studio is a high-performance Python application built with **PySide6** and
 
 If you prefer to run the pre-compiled standalone application without setting up a Python environment:
 
-* **[Download Depth Studio v1.0.0 (Google Drive / OneDrive / Dropbox)](https://drive.google.com/file/d/1JLmW5YuiO4gzx13PdV82pxLHFvjAgq-L/view?usp=drive_link)**
+* **[Download Depth Studio v1.0.0 (Google Drive)](https://drive.google.com/drive/folders/1jmEHynpbDtn78wCoBLtLl2bwT6RpxPbp?usp=drive_link)**
 
 *(Note: Hosted externally on cloud storage for fast, hassle-free downloads).*
 
