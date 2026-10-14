@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPush
 
 # ---------------------------------------------------------------- version / updates
 VERSION = "1.0.0"                      # Change this to "1.0.0" to test your update notification against release v1.0.1
-REPO = "recon215/depth-studio"         # GitHub  user/repo  (the repo must be public)
+REPO = "recon-vfx/depth-studio"         # GitHub  user/repo  (the repo must be public)
 
 
 def _vt(v):
