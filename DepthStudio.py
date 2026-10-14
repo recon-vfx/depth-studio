@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPush
                                QListWidgetItem, QSpinBox, QSizePolicy, QPlainTextEdit)
 
 # ---------------------------------------------------------------- version / updates
-VERSION = "1.0.1"                      # bump this for every release (must match the GitHub release tag, e.g. v1.0.1)
+VERSION = "1.0.0"                      # Change this to "1.0.0" to test your update notification against release v1.0.1
 REPO = "recon215/depth-studio"         # GitHub  user/repo  (the repo must be public)
 
 
@@ -58,7 +58,7 @@ def _vt(v):
 
 
 class Updater(QObject):
-    """Asks GitHub for the latest published release in a background thread. Silent if offline or rate-limited."""
+    """Asks GitHub for the latest published release in a background thread with built-in debug output."""
     found = Signal(str, str, str)   # tag, release notes, page url
 
     def start(self):
@@ -72,8 +72,12 @@ class Updater(QObject):
                 d = json.load(r)
             tag = d.get("tag_name", "")
             if tag and _vt(tag) > _vt(VERSION):
+                print("[DEBUG] New version detected! Emitting signal...")
                 self.found.emit(tag, (d.get("body") or "")[:800], d.get("html_url", ""))
-        except Exception:
+            else:
+                print("[DEBUG] App is already up to date or tag was empty.")
+        except Exception as e:
+            print("[DEBUG] Updater check failed:", e)
             pass
 
 
@@ -160,7 +164,6 @@ def guess_depth_output(path):
     return is_da3(low) and "mono" not in low
 
 
-# Model ranking: bigger = better. Used for the label (BEST / GOOD / FAST) and for the order of the list.
 SIZE_RANK = (("giant", 4), ("large", 3), ("vitl", 3), ("base", 2), ("vitb", 2), ("small", 1), ("vits", 1))
 SIZE_NAME = {4: "Giant", 3: "Large", 2: "Base", 1: "Small"}
 TIER = {4: "★★★ BEST", 3: "★★★ BEST", 2: "★★ GOOD", 1: "★ FAST"}
@@ -173,7 +176,6 @@ def size_rank(low, default=1):
 
 
 def sort_key(stem):
-    """Best first: bigger model first; at equal size V3 > Video Depth Anything > V2. Unknown files go last."""
     low = _low(stem)
     fam = 3 if is_da3(stem) else 2 if is_vda_enc(stem) else 1 if any(k in low for k, _ in SIZE_RANK) else 0
     return (fam == 0, -size_rank(low) if fam else 0, -fam)
@@ -210,7 +212,6 @@ def unique_label(models, label, stem):
 
 
 def find_models():
-    """Every .onnx we can see: next to the program, in models/, or bundled inside the exe. Sorted best -> fastest."""
     dirs = [APP_DIR, os.path.join(APP_DIR, "models")]
     if getattr(sys, "frozen", False) and getattr(sys, "_MEIPASS", None):
         dirs += [sys._MEIPASS, os.path.join(sys._MEIPASS, "models")]
@@ -221,23 +222,19 @@ def find_models():
     stem_of = lambda p: os.path.splitext(os.path.basename(p))[0]
     for f in sorted(set(paths), key=lambda p: (sort_key(stem_of(p)), -os.path.getsize(p))):
         stem = stem_of(f)
-        if is_vda_head(stem):  # heads are loaded together with their encoder
+        if is_vda_head(stem):
             continue
         out[unique_label(out, pretty(stem), stem)] = f
     return out
 
 
-# ---------------------------------------------------------------- small numeric helpers
 def depth_to_disp(d):
-    """Depth (far = big) -> disparity (near = big). 1/depth keeps perspective correct (better than 1 - depth)."""
     pos = d[d > 0]
     floor = float(np.percentile(pos[::7], 1)) * 0.1 if pos.size else 1e-3
     return (1.0 / np.maximum(d, max(floor, 1e-6))).astype(np.float32)
 
 
 def fit_box(rgb, W, H):
-    """Resize a frame to a model's fixed WxH. Nearly-matching aspect -> stretch. Otherwise letterbox with edge
-    replication (so the net never sees a hard black bar). Returns (image, (x0, y0, w, h) = where the picture sits)."""
     h, w = rgb.shape[:2]
     rgb = np.ascontiguousarray(rgb)
     if abs(np.log((w / h) / (W / H))) < 0.06:
@@ -251,7 +248,6 @@ def fit_box(rgb, W, H):
 
 
 def fit_scale_shift(src, ref):
-    """Least-squares a, b so that a*src + b ~= ref. Used to line up neighbouring video windows."""
     x = np.asarray(src)[:, ::4, ::4].astype(np.float64).ravel()
     y = np.asarray(ref)[:, ::4, ::4].astype(np.float64).ravel()
     A = np.stack([x, np.ones_like(x)], 1)
@@ -262,10 +258,6 @@ def fit_scale_shift(src, ref):
 
 
 def fuse_detail(d1, d2, amount):
-    """Detail transfer. d1 (main model) keeps the overall depth, scale and temporal stability; d2 (detail model) is
-    lined up to d1 and only its edge structure is mixed in. amount 0..1.
-    clean: d1 is edge-snapped to d2 with a guided filter (no halos).  sharp: d2's high frequencies are added on top
-    (crisper, recovers thin objects, but can overshoot next to edges)."""
     h, w = d1.shape
     if d2.shape != d1.shape:
         d2 = cv2.resize(np.ascontiguousarray(d2), (w, h), interpolation=cv2.INTER_CUBIC)
@@ -275,7 +267,7 @@ def fuse_detail(d1, d2, amount):
     s1, s2 = sm(d1), sm(d2)
     with np.errstate(all="ignore"):
         corr = np.corrcoef(s1, s2)[0, 1]
-    if corr < 0:  # second model uses the opposite convention (depth vs disparity): fix it automatically
+    if corr < 0:
         d2 = depth_to_disp(d2) if d2.min() > 0 else -d2
         s2 = sm(d2)
     A = np.stack([s2, np.ones_like(s2)], 1)
@@ -284,7 +276,7 @@ def fuse_detail(d1, d2, amount):
         a, b = 1.0, float(s1.mean() - s2.mean())
     d2 = d2 * np.float32(a) + np.float32(b)
     if BLEND_STYLE == "sharp":
-        sigma = max(1.5, w / 320.0)      # "fine" = anything smaller than about 6 px at 1920 wide
+        sigma = max(1.5, w / 320.0)
         lo1 = cv2.GaussianBlur(d1, (0, 0), sigma)
         lo2 = cv2.GaussianBlur(d2, (0, 0), sigma)
         return np.ascontiguousarray(d1 + amount * ((d2 - lo2) - (d1 - lo1)), np.float32)
@@ -302,12 +294,7 @@ def predict_blend(e1, e2, rgb, size, tta, amount, out_hw=None):
     return d
 
 
-# ---------------------------------------------------------------- depth engine (ONNX Runtime)
 class Engine:
-    """Holds the ONNX session(s). Thread-safe. Recovers by itself after a GPU reset.
-    Two kinds of model:
-      single - one .onnx, one frame in -> one depth map out   (Depth Anything V2 / V3)
-      video  - encoder + head pair that sees a 32-frame window (Video Depth Anything)"""
     def __init__(self):
         self.lock = threading.RLock()
         self.sess = self.enc = self.head = None
@@ -315,10 +302,10 @@ class Engine:
         self.inp = self.out = None
         self.dt = self.head_dt = np.float32
         self.u8 = self.nhwc = self.rank5 = False
-        self.fixed = None                      # (W, H) when the model only accepts one size
-        self.T = 32                            # window length of a video model
+        self.fixed = None
+        self.T = 32
         self.enc_in, self.enc_outs, self.head_ins, self.head_out = None, [], [], None
-        self.out_mode = 0                      # index into OUT_TYPES
+        self.out_mode = 0
         self.last_hw, self.provider = (0, 0), "-"
 
     @property
@@ -330,7 +317,6 @@ class Engine:
             self.sess = self.enc = self.head = None
             self.path = self.head_path = None
 
-    # ---- loading
     def load(self, path):
         with self.lock:
             self.sess = self.enc = self.head = None
@@ -349,9 +335,9 @@ class Engine:
 
     def _session(self, path):
         so = ort.SessionOptions()
-        so.log_severity_level = 3              # hide harmless optimizer warnings
+        so.log_severity_level = 3
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        if BACKEND == "DmlExecutionProvider":  # required by DirectML
+        if BACKEND == "DmlExecutionProvider":
             so.enable_mem_pattern = False
             so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         try:
@@ -359,13 +345,11 @@ class Engine:
         except Exception as e:
             if BACKEND is None:
                 raise
-            print("GPU session failed, falling back to CPU:", e)
             so2 = ort.SessionOptions()
             so2.log_severity_level = 3
             return ort.InferenceSession(path, so2, providers=["CPUExecutionProvider"])
 
     def _read_input(self, i):
-        """Works out how a model wants its picture: dtype, NCHW/NHWC, extra 'views' axis, fixed size."""
         self.u8 = "uint8" in i.type
         self.dt = np.float16 if "float16" in i.type else np.float32
         shp = list(i.shape)
@@ -383,7 +367,6 @@ class Engine:
         i = sess.get_inputs()[0]
         self.inp = i.name
         outs = [o.name for o in sess.get_outputs()]
-        # DA3 exports can have several outputs (depth, confidence, camera...). We want the depth one.
         self.out = (next((n for n in outs if n.lower() == "depth"), None)
                     or next((n for n in outs if "depth" in n.lower() and "conf" not in n.lower()), None) or outs[0])
         self._read_input(i)
@@ -422,12 +405,11 @@ class Engine:
             return fn()
         except Exception as e:
             if any(k in str(e) for k in GPU_ERR):
-                self.sess = self.enc = self.head = None  # rebuilt cleanly on the next call
+                self.sess = self.enc = self.head = None
                 raise RuntimeError("The GPU ran out of memory or the driver reset. Lower the Detail level "
                                    "(or lower 'max_tokens' in depth_studio.json) and try again.")
             raise
 
-    # ---- info
     def device_label(self):
         return {"DmlExecutionProvider": "GPU - DirectML (adapter %d)" % GPU_ID, "CUDAExecutionProvider": "GPU - CUDA",
                 "CoreMLExecutionProvider": "Apple CoreML", "CPUExecutionProvider": "CPU (slow)"}.get(self.provider, self.provider)
@@ -444,12 +426,10 @@ class Engine:
         return self.path is not None
 
     def depth_out(self):
-        """True if the model's raw output is depth (far = big) and must be turned into disparity."""
         if self.out_mode == 2:
             return True
         return self.out_mode == 0 and not self.is_video and guess_depth_output(self.path or "")
 
-    # ---- single-frame inference
     def _feed(self, img):
         if self.u8:
             x = img[None]
@@ -461,7 +441,6 @@ class Engine:
         return np.ascontiguousarray(x).astype(np.uint8 if self.u8 else self.dt, copy=False)
 
     def infer_once(self, rgb, size):
-        """One model pass. Returns disparity (near = big) at the model's own resolution (letterbox bars cropped off)."""
         h, w = rgb.shape[:2]
         with self.lock:
             self._ensure()
@@ -473,7 +452,7 @@ class Engine:
                 s = size / min(h, w)
                 W, H = max(14, round(w * s / 14) * 14), max(14, round(h * s / 14) * 14)
                 n = (W // 14) * (H // 14)
-                if n > MAX_TOKENS:  # safety cap: attention cost grows with n squared
+                if n > MAX_TOKENS:
                     f = (MAX_TOKENS / n) ** .5
                     W, H = max(14, int(W * f / 14) * 14), max(14, int(H * f / 14) * 14)
                 img = cv2.resize(np.ascontiguousarray(rgb), (W, H),
@@ -500,8 +479,6 @@ class Engine:
         return o
 
     def predict(self, rgb, size, tta=False, out_hw=None):
-        """Depth for one frame (larger = closer), resized to out_hw=(h, w) (default: the frame's own size).
-        tta=True averages the frame with its mirror image: about 2x slower, cleaner (single-frame models only)."""
         h, w = out_hw or rgb.shape[:2]
         if self.is_video:
             d = self.vda_single(rgb)
@@ -511,15 +488,13 @@ class Engine:
                 d2 = self.infer_once(np.ascontiguousarray(rgb[:, ::-1]), size)[:, ::-1]
                 lo1, hi1 = np.percentile(d[::2, ::2], (1, 99))
                 lo2, hi2 = np.percentile(d2[::2, ::2], (1, 99))
-                d2 = (d2 - lo2) / max(hi2 - lo2, 1e-6) * (hi1 - lo1) + lo1  # match scales before averaging
+                d2 = (d2 - lo2) / max(hi2 - lo2, 1e-6) * (hi1 - lo1) + lo1
                 d = .5 * (d + d2)
         if d.shape != (h, w):
             d = cv2.resize(np.ascontiguousarray(d), (w, h), interpolation=cv2.INTER_CUBIC)
         return np.ascontiguousarray(d, np.float32)
 
-    # ---- video model (encoder + temporal head)
     def vda_encode(self, rgb):
-        """One frame -> list of ViT feature tensors (kept as fp16 to halve the RAM of the 32-frame cache) + picture box."""
         with self.lock:
             self._ensure()
             W, H = self.fixed
@@ -530,7 +505,6 @@ class Engine:
         return [np.asarray(o).astype(np.float16) for o in outs], box
 
     def vda_head(self, feats):
-        """feats = T per-frame feature lists -> depth [T, H, W] at the model's resolution (consistent across the window)."""
         stacked = {n: np.concatenate([f[k] for f in feats], 0).astype(self.head_dt) for k, n in enumerate(self.head_ins)}
         with self.lock:
             self._ensure()
@@ -542,15 +516,11 @@ class Engine:
         return o
 
     def vda_single(self, rgb):
-        """Preview / still: one frame repeated across the window. Same spatial quality as the export, but no
-        temporal information (only the export sees neighbouring frames)."""
         f, (x0, y0, bw, bh) = self.vda_encode(rgb)
         return self.vda_head([f] * self.T)[0][y0:y0 + bh, x0:x0 + bw]
 
 
-# ---------------------------------------------------------------- image helpers
 def guided_filter(guide, src, r, eps=1e-3):
-    """Edge-aware smoothing: cleans noise in the depth while snapping its edges to the picture's edges."""
     k = (2 * r + 1, 2 * r + 1)
     box = lambda x: cv2.boxFilter(x, -1, k, borderType=cv2.BORDER_REFLECT)
     mI, mp = box(guide), box(src)
@@ -564,20 +534,18 @@ def base_norm(d, lo, hi):
 
 
 def depth_to_normals(n, s):
-    """Normal map from the finished depth (so it inherits edge cleanup, anti-flicker and cut handling)."""
     h, w = n.shape
-    d = cv2.GaussianBlur(n, (0, 0), max(0.8, w / 1920.0))   # kills staircase noise
-    k = s["nstrength"] * w                                    # resolution-independent strength
+    d = cv2.GaussianBlur(n, (0, 0), max(0.8, w / 1920.0))
+    k = s["nstrength"] * w
     dx = cv2.Sobel(d, cv2.CV_32F, 1, 0, ksize=3) / 8.0 * k
     dy = cv2.Sobel(d, cv2.CV_32F, 0, 1, ksize=3) / 8.0 * k
-    nx, ny = -dx, (-dy if s["nflip"] else dy)                 # nflip = DirectX (green down)
+    nx, ny = -dx, (-dy if s["nflip"] else dy)
     inv = 1.0 / np.sqrt(nx * nx + ny * ny + 1.0)
-    out = np.dstack((nx * inv, ny * inv, inv)) * 0.5 + 0.5    # RGB, 0..1
+    out = np.dstack((nx * inv, ny * inv, inv)) * 0.5 + 0.5
     return np.ascontiguousarray(out, np.float32)
 
 
 def finish(n, s, rgb=None):
-    """Edge cleanup -> black/white point -> contrast -> (flip | normals). Radii scale with frame height so preview == export."""
     k = s["clean"]
     n = np.ascontiguousarray(n, np.float32)
     if k > 0:
@@ -595,8 +563,6 @@ def finish(n, s, rgb=None):
 
 
 class Temporal:
-    """Anti-flicker for video: smooths the black/white points and blends still areas with the previous frame.
-    Resets by itself on scene cuts."""
     def __init__(self, a):
         self.a = a
         self.prev = self.pg = self.lo = self.hi = self.small = None
@@ -605,14 +571,14 @@ class Temporal:
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
         small = cv2.resize(gray, (32, 18), interpolation=cv2.INTER_AREA)
         if self.small is not None and float(np.abs(small - self.small).mean()) > .16:
-            self.prev = self.pg = self.lo = self.hi = None  # scene cut: start fresh
+            self.prev = self.pg = self.lo = self.hi = None
         self.small = small
         lo, hi = np.percentile(d[::4, ::4], (1, 99))
         a = self.a
         self.lo = lo if self.lo is None else a * self.lo + (1 - a) * lo
         self.hi = hi if self.hi is None else a * self.hi + (1 - a) * hi
         n = base_norm(d, self.lo, self.hi)
-        if self.prev is not None and self.prev.shape == n.shape:  # smooth still areas hard, never smear moving ones
+        if self.prev is not None and self.prev.shape == n.shape:
             diff = cv2.GaussianBlur(np.abs(gray - self.pg), (0, 0), 3)
             wgt = (a * .85 * np.exp(-diff / .05)).astype(np.float32)
             n = (wgt * self.prev + (1 - wgt) * n).astype(np.float32)
@@ -621,7 +587,7 @@ class Temporal:
 
 
 def colorize(n, cmap):
-    if n.ndim == 3:  # normal map: already RGB
+    if n.ndim == 3:
         return (np.clip(n, 0, 1) * 255 + .5).astype(np.uint8)
     u8 = (np.clip(n, 0, 1) * 255 + .5).astype(np.uint8)
     if COLORMAPS[cmap] is None:
@@ -634,7 +600,6 @@ def gray16(n):
 
 
 def to_bgr(a):
-    """cv2 writes BGR; our 3-channel data is RGB."""
     return np.ascontiguousarray(a[..., ::-1]) if a.ndim == 3 else a
 
 
@@ -645,7 +610,6 @@ def thumb(rgb, long_side=960):
 
 
 def save_image(path, arr):
-    """Unicode-safe image writing (cv2.imwrite fails on some Windows paths)."""
     ok, buf = cv2.imencode(os.path.splitext(path)[1] or ".png", arr)
     if not ok:
         raise RuntimeError("Couldn't write %s%s" % (os.path.basename(path),
@@ -664,7 +628,6 @@ def fmt_time(sec):
     return "%02d:%02d" % (sec // 60, sec % 60)
 
 
-# ---------------------------------------------------------------- ffmpeg video writer
 def find_ffmpeg():
     try:
         import imageio_ffmpeg
@@ -674,22 +637,19 @@ def find_ffmpeg():
 
 
 class FFWriter:
-    """Pipes frames into ffmpeg. mode: "gray16" (16-bit gray), "rgb48" (16-bit RGB) or "rgb24" (8-bit RGB).
-    The 16-bit modes are used for every format that is 10-bit or better, so gradients stay smooth (no 8-bit banding).
-    quality 0/1/2 = Good/High/Max. For ProRes it sets the bits per macroblock (the ProRes 'bitrate')."""
     def __init__(self, path, w, h, fps, fmt, quality, mode="rgb24", src=None, ss=0.0, dur=0.0):
         exe = find_ffmpeg()
         if not exe:
             raise RuntimeError("ffmpeg not found. Run:  pip install imageio-ffmpeg")
         self.path, self.mode = path, mode
-        self.log = tempfile.TemporaryFile()  # ffmpeg errors go to a file, so a full pipe can never stall us
+        self.log = tempfile.TemporaryFile()
         pix_in = {"gray16": "gray16le", "rgb48": "rgb48le"}.get(mode, "rgb24")
         cmd = [exe, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", pix_in,
                "-s", "%dx%d" % (w, h), "-r", "%.5f" % fps, "-i", "-"]
         if src:
             cmd += ["-ss", "%.3f" % ss, "-t", "%.3f" % dur, "-i", src]
         cmd += ["-map", "0:v"] + (["-map", "1:a:0?"] if src else [])
-        vf = ["-vf", "scale=out_color_matrix=bt709,pad=ceil(iw/2)*2:ceil(ih/2)*2"]   # HD colour matrix + even size
+        vf = ["-vf", "scale=out_color_matrix=bt709,pad=ceil(iw/2)*2:ceil(ih/2)*2"]
         tags = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
         if fmt == F_H264:
             cmd += vf + tags + ["-c:v", "libx264", "-preset", "slow", "-profile:v", "high", "-crf", str([17, 12, 8][quality]),
@@ -702,15 +662,14 @@ class FFWriter:
             cmd += vf + tags + ["-c:v", "prores_ks", "-profile:v", str(profile), "-vendor", "apl0", "-pix_fmt", pix]
             if quality == 1:
                 cmd += ["-bits_per_mb", "4096"]
-            elif quality == 2:                       # highest the encoder allows, smallest slices
+            elif quality == 2:
                 cmd += ["-bits_per_mb", "8192", "-mbs_per_slice", "1"]
-        else:  # lossless FFV1
+        else:
             cmd += ["-c:v", "ffv1", "-level", "3", "-g", "1",
                     "-pix_fmt", {"gray16": "gray16le", "rgb48": "rgb48le"}.get(mode, "bgr0")]
         if src:
             cmd += ["-c:a", "pcm_s16le"] if (fmt in PRORES or fmt == F_FFV1) else ["-c:a", "aac", "-b:a", "256k"]
         cmd.append(path)
-        print("ffmpeg:", " ".join(cmd))
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=self.log, creationflags=flags)
 
@@ -758,7 +717,6 @@ class FFWriter:
             pass
 
 
-# ---------------------------------------------------------------- background workers
 class LoadWorker(QThread):
     done = Signal(str)
     failed = Signal(str)
@@ -776,9 +734,7 @@ class LoadWorker(QThread):
 
 
 class PreviewWorker(QThread):
-    """Does ALL the preview work (decoding + AI + filters) off the UI thread. Only the newest request is kept,
-    so scrubbing and sliders can never pile up or freeze the window."""
-    ready = Signal(int, object, object, object, str)   # frame index, source rgb, depth rgb, depth values, info text
+    ready = Signal(int, object, object, object, str)
     failed = Signal(str)
 
     def __init__(self, engine, engine2):
@@ -841,7 +797,7 @@ class PreviewWorker(QThread):
                     info = "Preview (look only, cached) | %s" % self.engine.describe()
                 raw = cache[1]
                 e2, amt = self.engine2, s.get("blend", 0.)
-                if amt > 0 and e2.ready():  # detail model: only its fine structure is mixed in
+                if amt > 0 and e2.ready():
                     key2 = (video, idx, size, tta, e2.path, e2.out_mode)
                     if cache2 is None or cache2[0] != key2:
                         t = time.perf_counter()
@@ -889,7 +845,6 @@ class StillWorker(QThread):
 
 
 class ExportWorker(QThread):
-    """GPU thread reads frames + runs the AI; a second CPU thread filters + encodes, so both stay busy."""
     progress = Signal(int, str)
     preview = Signal(object, object)
     finished_ok = Signal(str, bool)
@@ -925,7 +880,6 @@ class ExportWorker(QThread):
             self._job(j, "Clip %d/%d" % (k + 1, len(jobs)))
         self.finished_ok.emit(self.s["out_dir"], self.cancel)
 
-    # ---- where the depth frames come from: one-by-one (V2/V3) or in overlapping windows (Video Depth Anything)
     def _stream(self, cap, count, w, h):
         e2, amt = self.engine2, self.s.get("blend", 0.)
         for i, rgb, raw in self._stream_base(cap, count, w, h):
@@ -948,8 +902,6 @@ class ExportWorker(QThread):
             yield i, rgb, eng.predict(rgb, s["size"], s["tta"], out_hw=(h, w))
 
     def _stream_video(self, cap, count, w, h):
-        """Sliding 32-frame windows with 10 frames of overlap. Each new window is scale/shift-fitted to the previous one
-        on the shared frames and cross-faded over them, so depth stays on one consistent scale for the whole clip."""
         eng = self.engine
         T = eng.T
         O = max(2, min(10, T // 3))
@@ -976,7 +928,7 @@ class ExportWorker(QThread):
             ensure(min(start + T - 1, total - 1))
             if self.cancel or start >= total:
                 break
-            idx = [min(start + j, total - 1) for j in range(T)]   # last window repeats the final frame
+            idx = [min(start + j, total - 1) for j in range(T)]
             d = eng.vda_head([feats[i] for i in idx])
             x0, y0, bw, bh = box
             d = d[:, y0:y0 + bh, x0:x0 + bw]
@@ -1073,7 +1025,7 @@ class ExportWorker(QThread):
                     if not put((i, rgb, raw)):
                         break
                 failed = False
-            finally:  # always release the CPU thread, even if the AI raised
+            finally:
                 if failed or self.cancel or err:
                     try:
                         while True:
@@ -1099,9 +1051,8 @@ class ExportWorker(QThread):
                     writer.abort()
 
 
-# ---------------------------------------------------------------- console / log
 class LogBus(QObject):
-    line = Signal(str)   # thread-safe: workers can log, the window shows it
+    line = Signal(str)
 
 
 LOG = LogBus()
@@ -1112,7 +1063,6 @@ def log(msg):
 
 
 class Tee:
-    """Copies print() output and error messages into the console panel (and still to the real console if there is one)."""
     def __init__(self, orig):
         self.orig = orig
 
@@ -1138,8 +1088,6 @@ class Tee:
 
 
 class StatusLabel(QLabel):
-    """The status line also writes into the console, so long messages are never lost.
-    Per-frame progress lines are throttled to one every 5 seconds."""
     def __init__(self, *a):
         super().__init__(*a)
         self._last, self._tp = "", 0.
@@ -1155,7 +1103,6 @@ class StatusLabel(QLabel):
         self._last = t
 
 
-# ---------------------------------------------------------------- UI helpers
 def mk_slider(lo, hi, val, fmt, tip=""):
     sl = QSlider(Qt.Orientation.Horizontal)
     sl.setRange(lo, hi)
@@ -1182,7 +1129,6 @@ def mk_combo(items, tip=""):
 
 
 def wide_popup(cb, width=560):
-    """Closed box stays compact; the opened list is wide enough to show the full model names."""
     cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
     cb.setMinimumContentsLength(20)
     cb.view().setMinimumWidth(width)
@@ -1221,7 +1167,6 @@ QToolTip{background:#1a1114;color:#ffe9d6;border:1px solid #ff7a00}
 """
 
 
-# ---------------------------------------------------------------- main window
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1262,7 +1207,6 @@ class Main(QMainWindow):
         side.addWidget(t)
         side.addWidget(st)
 
-        # video
         g = QGroupBox("🎥 Video")
         v = QVBoxLayout(g)
         b = QPushButton("Open Video...  (or drag & drop)")
@@ -1273,7 +1217,6 @@ class Main(QMainWindow):
         v.addWidget(self.info)
         side.addWidget(g)
 
-        # model
         g = QGroupBox("🧠 AI Model")
         f = QFormLayout(g)
         self.model_cb = QComboBox()
@@ -1318,7 +1261,6 @@ class Main(QMainWindow):
         f.addRow(self.dev_lbl)
         side.addWidget(g)
 
-        # look
         g = QGroupBox("🎨 Look")
         f = QFormLayout(g)
         self.mode = mk_combo(["Depth map", "Normal map (from depth)"], "Normal map is computed from the cleaned depth.")
@@ -1349,7 +1291,6 @@ class Main(QMainWindow):
         f.addRow(self.tta)
         side.addWidget(g)
 
-        # frame range
         g = QGroupBox("✂️ Frame range")
         gl = QGridLayout(g)
         self.start_spin, self.end_spin = QSpinBox(), QSpinBox()
@@ -1368,7 +1309,6 @@ class Main(QMainWindow):
         gl.addWidget(b2, 1, 2)
         side.addWidget(g)
 
-        # export + queue
         g = QGroupBox("💾 Export")
         v = QVBoxLayout(g)
         self.fmt = mk_combo(FORMATS, "PNG 16-bit or EXR are best for After Effects / Nuke / Blender. "
@@ -1422,7 +1362,6 @@ class Main(QMainWindow):
             side.addWidget(wdg)
         side.addStretch()
 
-        # right: previews + transport
         right = QVBoxLayout()
         lay.addLayout(right, 1)
         pv = QHBoxLayout()
@@ -1475,7 +1414,6 @@ class Main(QMainWindow):
         for wdg in (self.play_btn, self.slider, self.frame_lbl, still):
             tr.addWidget(wdg)
 
-        # timers / signals
         self.timer = QTimer(singleShot=True, interval=150)
         self.timer.timeout.connect(self.request_preview)
         self.play_timer = QTimer(interval=15)
@@ -1491,12 +1429,11 @@ class Main(QMainWindow):
         log("Models found: %s" % (", ".join(os.path.basename(p) for p in self.models.values()) or "none"))
         QTimer.singleShot(200, self.autoload)
 
-        # update check (background, silent if offline)
+        # update check (background, prints debug output to console)
         self.updater = Updater()
         self.updater.found.connect(self.on_update)
         QTimer.singleShot(1500, self.updater.start)
 
-    # ---------------- updates
     def on_update(self, tag, notes, url):
         log("Update available: %s (you have v%s)" % (tag, VERSION))
         m = QMessageBox.question(self, "Update available",
@@ -1505,11 +1442,10 @@ class Main(QMainWindow):
         if m == QMessageBox.StandardButton.Yes and url:
             webbrowser.open(url)
 
-    # ---------------- model
     def autoload(self):
         name = CFG.get("model")
         if name not in self.models:
-            name = list(self.models)[0] if self.models else None   # list is sorted best first
+            name = list(self.models)[0] if self.models else None
         if name:
             self.model_cb.setCurrentText(name)
             self.start_load(name, self.models[name])
@@ -1566,7 +1502,7 @@ class Main(QMainWindow):
         if name in self.models and self.models[name] != p:
             name = "%s [%s]" % (name, stem)
         self.models[name] = p
-        self.models = dict(sorted(self.models.items(),          # keep the list best first
+        self.models = dict(sorted(self.models.items(),
                                   key=lambda kv: sort_key(os.path.splitext(os.path.basename(kv[1]))[0])))
         self.model_cb.clear()
         self.model_cb.addItems(list(self.models) + [BROWSE])
@@ -1580,7 +1516,7 @@ class Main(QMainWindow):
         self.model2_cb.clear()
         self.model2_cb.addItem(NO_BLEND)
         for n, p in self.models.items():
-            if not is_vda_enc(os.path.splitext(os.path.basename(p))[0]):  # detail model must be a single-frame model
+            if not is_vda_enc(os.path.splitext(os.path.basename(p))[0]):
                 self.model2_cb.addItem(n)
         self.model2_cb.setCurrentIndex(max(0, self.model2_cb.findText(cur)))
         self.model2_cb.blockSignals(False)
@@ -1634,7 +1570,6 @@ class Main(QMainWindow):
         if self.engine2.path and self.model2_cb.currentIndex() > 0:
             self.start_load2(self.model2_cb.currentText(), self.engine2.path)
 
-    # ---------------- settings
     def settings(self):
         return dict(size=self.detail.currentData(), cmap=self.cmap.currentText(), gamma=self.gamma.value() / 100,
                     smooth=self.smooth.value() / 100, black=self.black.value() / 100, white=self.white.value() / 100,
@@ -1643,7 +1578,6 @@ class Main(QMainWindow):
                     mode=self.mode.currentIndex(), nstrength=self.nstr.value() / 100, nflip=self.nflip.isChecked(),
                     format=self.fmt.currentText(), quality=self.quality.currentIndex(), audio=self.audio.isChecked())
 
-    # ---------------- video loading / drag & drop
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
@@ -1694,7 +1628,6 @@ class Main(QMainWindow):
         self.set_frame_label(0)
         self.request_preview()
 
-    # ---------------- queue
     def queue_add(self, paths):
         have = {self.queue.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.queue.count())}
         for p in paths:
@@ -1715,7 +1648,6 @@ class Main(QMainWindow):
         for it in self.queue.selectedItems():
             self.queue.takeItem(self.queue.row(it))
 
-    # ---------------- preview
     def show_img(self, lbl, rgb):
         self._imgs[lbl] = rgb
         lbl.setPixmap(to_pixmap(rgb).scaled(lbl.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
@@ -1742,14 +1674,13 @@ class Main(QMainWindow):
 
     def on_ready(self, idx, src, dep, n, info):
         if self.exporting or (not self.playing and idx != self.slider.value()):
-            return  # stale result
+            return
         self.show_img(self.src_lbl, src)
         if dep is not None:
             self.show_img(self.dep_lbl, dep)
             self.cur_n, self.cur_idx = n, idx
         self.perf.setText(info)
 
-    # ---------------- playback (real-time clock; frames are skipped if the AI is slower than the video)
     def toggle_play(self):
         if self.playing:
             return self.stop_play()
@@ -1782,7 +1713,6 @@ class Main(QMainWindow):
             self.set_frame_label(i)
             self.request_preview()
 
-    # ---------------- save still
     def save_still(self):
         if not self.video or not self.engine.ready():
             return QMessageBox.information(self, "Depth Studio", "Open a video and let the model load first.")
@@ -1799,7 +1729,6 @@ class Main(QMainWindow):
         self.still.done.connect(lambda m: self.status.setText(m))
         self.still.start()
 
-    # ---------------- export
     def set_busy(self, busy):
         self.exporting = busy
         self.pw.paused = busy
@@ -1885,7 +1814,7 @@ class Main(QMainWindow):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    sys.stdout, sys.stderr = Tee(sys.stdout), Tee(sys.stderr)   # print() and error output also go to the console panel
+    sys.stdout, sys.stderr = Tee(sys.stdout), Tee(sys.stderr)
     sys.excepthook = lambda t, v, tb: log("UNCAUGHT ERROR:\n" + "".join(traceback.format_exception(t, v, tb)))
     threading.excepthook = lambda a: log("ERROR in thread %s:\n%s" % (a.thread.name if a.thread else "?", "".join(
         traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback))))
