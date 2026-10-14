@@ -48,7 +48,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPush
                                QListWidgetItem, QSpinBox, QSizePolicy, QPlainTextEdit)
 
 # ---------------------------------------------------------------- version / updates
-VERSION = "1.0.0"                      # bump this for every release (must match the GitHub release tag, e.g. v1.0.1)
+VERSION = "1.0.1"                      # bump this for every release (must match the GitHub release tag, e.g. v1.0.1)
 REPO = "recon215/depth-studio"         # GitHub  user/repo  (the repo must be public)
 
 
