@@ -58,7 +58,8 @@ pip install onnxruntime-directml numpy opencv-python PySide6 imageio-ffmpeg
 Create a folder named models next to DepthStudio.py and drop your .onnx model files inside it.
 
 4. Run the App
-- open your terminal in the folder with depth studio
+Bash
 python DepthStudio.py
+
 📜 Licenses
 Please review the respective model card licenses for any .onnx models you use (e.g., Depth Anything V2 Large is licensed under CC-BY-NC-4.0 for non-commercial use; V2 Small/Base, V3, and Video Depth Anything are Apache-2.0).
