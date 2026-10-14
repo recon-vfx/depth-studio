@@ -58,7 +58,6 @@ pip install onnxruntime-directml numpy opencv-python PySide6 imageio-ffmpeg
 Create a folder named models next to DepthStudio.py and drop your .onnx model files inside it.
 
 4. Run the App
-Bash
 python DepthStudio.py
 
 📜 Licenses
