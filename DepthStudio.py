@@ -20,27 +20,62 @@ SUPPORTED MODELS (drop the .onnx files in a "models" folder next to this script 
                                                    vda_vits_head_T32_37x65_fp16.onnx
         Only the *_encoder_* file shows up in the model list; the matching *_head_* file is found automatically.
 
+UPDATES: on startup the app checks the newest published GitHub Release of REPO (below). If its tag is higher than
+VERSION, a popup offers to open the download page.
+
 INSTALL (Windows, Python 3.10-3.12)
   pip install onnxruntime-directml numpy opencv-python PySide6 imageio-ffmpeg
   (do NOT also install plain "onnxruntime" - they conflict)
 RUN
-  python depth_studio.py
+  python DepthStudio.py
 
 LICENSES: check the model card of every .onnx you use. Depth Anything V2 Large is CC-BY-NC-4.0 (non-commercial);
 V2 Small, V3 Small/Base and Video Depth Anything Small are Apache-2.0.
 """
 import os, sys, time, glob, json, shutil, subprocess, threading, queue, tempfile, traceback
+import urllib.request, webbrowser
 os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"  # must be set before importing cv2 (EXR export)
 APP_DIR = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 import numpy as np
 import cv2
 import onnxruntime as ort
+ort.set_default_logger_severity(3)   # only show real errors (hides the harmless "constant fold Sqrt" warnings)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QObject
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton, QSlider, QComboBox,
                                QCheckBox, QFileDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QProgressBar,
                                QGroupBox, QFormLayout, QMessageBox, QScrollArea, QListWidget,
                                QListWidgetItem, QSpinBox, QSizePolicy, QPlainTextEdit)
+
+# ---------------------------------------------------------------- version / updates
+VERSION = "1.0.0"                      # bump this for every release (must match the GitHub release tag, e.g. v1.0.1)
+REPO = "recon215/depth-studio"         # GitHub  user/repo  (the repo must be public)
+
+
+def _vt(v):
+    """'v1.2.3' -> (1, 2, 3) so versions compare correctly."""
+    return tuple(int(x) for x in str(v).lstrip("vV").split(".") if x.isdigit())
+
+
+class Updater(QObject):
+    """Asks GitHub for the latest published release in a background thread. Silent if offline or rate-limited."""
+    found = Signal(str, str, str)   # tag, release notes, page url
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        try:
+            req = urllib.request.Request("https://api.github.com/repos/%s/releases/latest" % REPO,
+                                         headers={"User-Agent": "DepthStudio"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                d = json.load(r)
+            tag = d.get("tag_name", "")
+            if tag and _vt(tag) > _vt(VERSION):
+                self.found.emit(tag, (d.get("body") or "")[:800], d.get("html_url", ""))
+        except Exception:
+            pass
+
 
 # ---------------------------------------------------------------- settings file
 CFG_PATH = os.path.join(APP_DIR, "depth_studio.json")
@@ -314,6 +349,7 @@ class Engine:
 
     def _session(self, path):
         so = ort.SessionOptions()
+        so.log_severity_level = 3              # hide harmless optimizer warnings
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         if BACKEND == "DmlExecutionProvider":  # required by DirectML
             so.enable_mem_pattern = False
@@ -324,7 +360,9 @@ class Engine:
             if BACKEND is None:
                 raise
             print("GPU session failed, falling back to CPU:", e)
-            return ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+            so2 = ort.SessionOptions()
+            so2.log_severity_level = 3
+            return ort.InferenceSession(path, so2, providers=["CPUExecutionProvider"])
 
     def _read_input(self, i):
         """Works out how a model wants its picture: dtype, NCHW/NHWC, extra 'views' axis, fixed size."""
@@ -1143,6 +1181,13 @@ def mk_combo(items, tip=""):
     return c
 
 
+def wide_popup(cb, width=560):
+    """Closed box stays compact; the opened list is wide enough to show the full model names."""
+    cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+    cb.setMinimumContentsLength(20)
+    cb.view().setMinimumWidth(width)
+
+
 STYLE = """
 QWidget{background:#0b0709;color:#ffe9d6;font-size:13px}
 QWidget#plain,QLabel,QCheckBox{background:transparent}
@@ -1189,7 +1234,7 @@ class Main(QMainWindow):
         self._pending_load = self._pending2 = None
         self.cur_n, self.cur_idx, self.cur_model = None, 0, None
         self.last_out = CFG.get("out_dir")
-        self.setWindowTitle(" Depth Studio - Made by Reconvfx")
+        self.setWindowTitle(" Depth Studio v%s - Made by Reconvfx" % VERSION)
         self.resize(1500, 900)
         self.setAcceptDrops(True)
 
@@ -1212,7 +1257,7 @@ class Main(QMainWindow):
 
         t = QLabel(" DEPTH STUDIO - Made by Reconvfx ")
         t.setObjectName("title")
-        st = QLabel("turn video into depth + normal maps  🦇  ")
+        st = QLabel("turn video into depth + normal maps  🦇  v%s" % VERSION)
         st.setObjectName("sub")
         side.addWidget(t)
         side.addWidget(st)
@@ -1233,6 +1278,7 @@ class Main(QMainWindow):
         f = QFormLayout(g)
         self.model_cb = QComboBox()
         self.model_cb.addItems(list(self.models) + [BROWSE])
+        wide_popup(self.model_cb)
         self.model_cb.setToolTip("Models are listed best first. Video Depth Anything = smoothest over time. "
                                  "Depth Anything V3 / V2 Large = sharpest single frames. "
                                  "Models are the .onnx files in the models folder.")
@@ -1250,6 +1296,7 @@ class Main(QMainWindow):
         self.dev_lbl.setObjectName("sub")
         self.dev_lbl.setWordWrap(True)
         self.model2_cb = QComboBox()
+        wide_popup(self.model2_cb)
         self.model2_cb.setToolTip("Optional second model that adds fine edges. Best pairing: Video Depth Anything as the main model "
                                   "(stable) + Depth Anything V3 / V2 Large here (sharp). Needs more GPU memory and is slower.")
         self.model2_cb.activated.connect(self.model2_chosen)
@@ -1440,9 +1487,23 @@ class Main(QMainWindow):
         for c in (self.cmap, self.detail, self.mode):
             c.currentIndexChanged.connect(lambda *_: self.timer.start())
         self.setStyleSheet(STYLE)
-        log("Depth Studio started | onnxruntime %s | backend: %s | providers: %s" % (ort.__version__, BACKEND or "CPU only", ", ".join(_AV)))
+        log("Depth Studio v%s started | onnxruntime %s | backend: %s | providers: %s" % (VERSION, ort.__version__, BACKEND or "CPU only", ", ".join(_AV)))
         log("Models found: %s" % (", ".join(os.path.basename(p) for p in self.models.values()) or "none"))
         QTimer.singleShot(200, self.autoload)
+
+        # update check (background, silent if offline)
+        self.updater = Updater()
+        self.updater.found.connect(self.on_update)
+        QTimer.singleShot(1500, self.updater.start)
+
+    # ---------------- updates
+    def on_update(self, tag, notes, url):
+        log("Update available: %s (you have v%s)" % (tag, VERSION))
+        m = QMessageBox.question(self, "Update available",
+                                 "Depth Studio %s is available (you have v%s).\n\n%s\n\nOpen the download page?"
+                                 % (tag, VERSION, notes))
+        if m == QMessageBox.StandardButton.Yes and url:
+            webbrowser.open(url)
 
     # ---------------- model
     def autoload(self):
