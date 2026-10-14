@@ -41,7 +41,7 @@ import cv2
 import onnxruntime as ort
 ort.set_default_logger_severity(3)   # only show real errors (hides the harmless "constant fold Sqrt" warnings)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QObject
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QImage, QPixmap, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel, QPushButton, QSlider, QComboBox,
                                QCheckBox, QFileDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QProgressBar,
                                QGroupBox, QFormLayout, QMessageBox, QScrollArea, QListWidget,
@@ -1181,6 +1181,7 @@ class Main(QMainWindow):
         self.last_out = CFG.get("out_dir")
         self.setWindowTitle(" Depth Studio v%s - Made by Reconvfx" % VERSION)
         self.resize(1500, 900)
+        self.setWindowIcon(QIcon(os.path.join(APP_DIR, "icon.ico")))
         self.setAcceptDrops(True)
 
         self.pw = PreviewWorker(self.engine, self.engine2)
