@@ -1,0 +1,5 @@
+*
+!.gitignore
+!DepthStudio.py
+!requirements.txt
+!README.md

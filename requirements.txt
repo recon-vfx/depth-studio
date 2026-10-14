@@ -1,0 +1,5 @@
+onnxruntime-directml
+numpy
+opencv-python
+PySide6
+imageio-ffmpeg
